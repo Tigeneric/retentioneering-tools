@@ -52,6 +52,7 @@ class Cohorts:
     cut_bottom: int
     cut_right: int
     cut_diagonal: int
+    start_event: str
     _cohort_matrix_result: pd.DataFrame
 
     @time_performance(
@@ -59,46 +60,166 @@ class Cohorts:
         event_name="init",
     )
     def __init__(self, eventstream: EventstreamType):
+        self.active_size = pd.DataFrame()
         self.__eventstream = eventstream
         self.user_col = self.__eventstream.schema.user_id
         self.event_col = self.__eventstream.schema.event_name
         self.time_col = self.__eventstream.schema.event_timestamp
 
         self._cohort_matrix_result = pd.DataFrame()
+        self.group_size = pd.DataFrame()
+    '''
 
-    def _add_min_date(
+    @staticmethod
+    def _get_min_max_dates(data: pd.Series, freq) -> tuple:
+        start_point = np.datetime64(data.min().to_period(freq).start_time, freq)
+        end_point = np.datetime64(data.max(), freq) #+ step
+        return start_point, end_point
+
+    @staticmethod
+    def _adjust_frequency(cohort_start_unit: str, cohort_period_unit: str) -> str:
+        if cohort_start_unit == "W":
+            return "D"
+        return cohort_start_unit if DATETIME_UNITS_LIST.index(cohort_start_unit) >= DATETIME_UNITS_LIST.index(cohort_period_unit) else cohort_period_unit
+
+    @staticmethod
+    def _create_cohorts(min_date: pd.Timestamp, max_date: pd.Timestamp, freq: str, cohort_period: int, cohort_period_unit: str) -> pd.DataFrame:
+        step = np.timedelta64(cohort_period, cohort_period_unit)
+
+        # Generating an array of cohort group start dates
+        # The range starts from the earliest user's event date (start_point) and ends at the latest user's event date (end_point),
+        # with each step representing one cohort period (step)
+        coh_groups_start_dates = np.arange(min_date, max_date, step)
+
+        # Converting the array of cohort start dates to datetime format, and then converting to periods
+        # The period format is based on the previously defined frequency (freq)
+        coh_groups_start_dates = pd.to_datetime(coh_groups_start_dates).to_period(freq)
+
+        if max_date < coh_groups_start_dates[-1].start_time:
+            coh_groups_start_dates = coh_groups_start_dates[:-1]
+        cohorts_list = pd.DataFrame(data=coh_groups_start_dates, columns=["CohortGroup"])
+        cohorts_list["CohortGroupNum"] = np.arange(1, len(cohorts_list) + 1)
+        return cohorts_list
+
+    def _add_cohort_info(self, data: pd.DataFrame, cohorts_list: pd.DataFrame, freq: str) -> pd.DataFrame:
+        data["OrderPeriod"] = pd.to_datetime(data[self.time_col]).dt.to_period(freq)
+        start_int = cohorts_list["CohortGroup"].min().ordinal
+        converter_freq = np.timedelta64(cohorts_list["CohortGroup"].freq.n, cohorts_list["CohortGroup"].freq.name[0])
+        converter_freq_ = converter_freq.astype(f"timedelta64[{freq}]").astype(int)
+        data["CohortGroupNum"] = (data["user_min_date_gr"].view("int64") - start_int + converter_freq_) // converter_freq_
+        data = data.merge(cohorts_list, on="CohortGroupNum", how="left")
+        data["CohortPeriod"] = ((data["OrderPeriod"].view("int64") - (data["CohortGroup"].view("int64") + converter_freq_)) // converter_freq_) + 1
+        return data
+
+    def add_cohort_analysis_data(
         self,
         data: pd.DataFrame,
         cohort_start_unit: DATETIME_UNITS,
         cohort_period: int,
         cohort_period_unit: DATETIME_UNITS,
     ) -> pd.DataFrame:
-        freq = cohort_start_unit
-        data["user_min_date_gr"] = data.groupby(self.user_col)[self.time_col].transform(min)
-        min_cohort_date = data["user_min_date_gr"].min().to_period(freq).start_time
+
+        data = data.copy()
+
+        data["user_min_date_gr"] = self._calculate_user_min_dates(data, self.user_col, self.time_col)
+
+        freq = self._adjust_frequency(cohort_start_unit, cohort_period_unit)
+
+        min_cohort_date, max_cohort_date = self._get_min_max_dates(data["user_min_date_gr"], freq)
+
+        data["user_min_date_gr"] = pd.to_datetime(data["user_min_date_gr"]).dt.to_period(freq)
+
+        cohorts_list = self._create_cohorts(min_cohort_date, max_cohort_date, freq, cohort_period, cohort_period_unit)
+
+        data = self._add_cohort_info(data, cohorts_list, freq)
+
+        return data
+
+
+    '''
+
+
+    @staticmethod
+    def _calculate_user_min_dates(data: pd.DataFrame, user_col: str, time_col: str) -> pd.Series:
+        return data.groupby(user_col)[time_col].transform('min')
+
+    @staticmethod
+    def _adjust_frequency(cohort_start_unit: str, cohort_period_unit: str) -> str:
+        if cohort_start_unit == "W":
+            return "D"
+        if DATETIME_UNITS_LIST.index(cohort_start_unit) >= DATETIME_UNITS_LIST.index(cohort_period_unit):
+            return cohort_start_unit
+        return cohort_period_unit
+
+    def add_cohort_analysis_data(
+        self,
+        data: pd.DataFrame,
+        cohort_start_unit: DATETIME_UNITS,
+        cohort_period: int,
+        cohort_period_unit: DATETIME_UNITS,
+    ) -> pd.DataFrame:
+
+        data = data.copy()
+
+        freq = self._adjust_frequency(cohort_start_unit, cohort_period_unit)
+
+        # Setting the frequency for grouping users into cohorts based on the starting unit of the cohort
+        #freq = cohort_start_unit
+
+        # Calculating the minimum event date for each user
+        # This will be used to determine the user's cohort
+        data["user_min_date_gr"] = self._calculate_user_min_dates(data, self.user_col, self.time_col)
+
+        # Finding the minimum and maximum dates among all users
+        # This will be used to define the time range for the cohorts
+        min_cohort_date = data["user_min_date_gr"].min().to_period(cohort_start_unit).start_time
         max_cohort_date = data["user_min_date_gr"].max()
-        if DATETIME_UNITS_LIST.index(cohort_start_unit) < DATETIME_UNITS_LIST.index(cohort_period_unit):
-            freq = cohort_period_unit
 
-        if freq == "W":
-            freq = "D"
+        # Checking if we need to change the time frequency for cohort grouping
+        # This may be necessary if the time unit for the start of the cohort is smaller than the time unit for the cohort period
+        #if DATETIME_UNITS_LIST.index(cohort_start_unit) < DATETIME_UNITS_LIST.index(cohort_period_unit):
+        #    freq = cohort_period_unit
 
+        # Changing the time frequency to 'D' (days) if it was set to 'W' (weeks)
+        # This is done to ensure more accurate grouping
+        #if freq == "W":
+        #    freq = "D"
+
+        # Converting the minimum event date of each user to a period based on the time frequency
         data["user_min_date_gr"] = data["user_min_date_gr"].dt.to_period(freq)
 
+        # Calculating the time step to define the boundaries of the cohorts
+        # For example, if the cohort period is 1 month, the step will be equal to 1 month
         step = np.timedelta64(cohort_period, cohort_period_unit)
+
+        # Converting the minimum and maximum dates to the numpy datetime64 format for further calculations
         start_point = np.datetime64(min_cohort_date, freq)
-        end_point = np.datetime64(max_cohort_date, freq) + np.timedelta64(cohort_period, cohort_period_unit)
+        end_point = np.datetime64(max_cohort_date, freq) + step
 
+        # Generating an array of cohort group start dates
+        # The range starts from the earliest user's event date (start_point) and ends at the latest user's event date (end_point),
+        # with each step representing one cohort period (step)
         coh_groups_start_dates = np.arange(start_point, end_point, step)
-        coh_groups_start_dates = pd.to_datetime(coh_groups_start_dates).to_period(freq)
-        if max_cohort_date < coh_groups_start_dates[-1].start_time:  # type: ignore
-            coh_groups_start_dates = coh_groups_start_dates[:-1]  # type: ignore
 
-        cohorts_list = pd.DataFrame(
-            data=coh_groups_start_dates, index=None, columns=["CohortGroup"]  # type: ignore
-        ).reset_index()
-        cohorts_list.columns = ["CohortGroupNum", "CohortGroup"]  # type: ignore
-        cohorts_list["CohortGroupNum"] += 1
+        # Converting the array of cohort start dates to datetime format, and then converting to periods
+        # The period format is based on the previously defined frequency (freq)
+        coh_groups_start_dates = pd.to_datetime(coh_groups_start_dates).to_period(freq)
+
+        # Checking if the last cohort group's start date is later than the latest user's event date
+        # If true, this means the last cohort group is empty and should be removed
+        if max_cohort_date < coh_groups_start_dates[-1].start_time:
+            # Remove the last cohort group start date from the array
+            coh_groups_start_dates = coh_groups_start_dates[:-1]
+
+        #old version
+        #cohorts_list = pd.DataFrame(
+        #    data=coh_groups_start_dates, index=None, columns=["CohortGroup"]  # type: ignore
+        #).reset_index()
+        #cohorts_list.columns = ["CohortGroupNum", "CohortGroup"]  # type: ignore
+        #cohorts_list["CohortGroupNum"] += 1
+
+        cohorts_list = pd.DataFrame(data=coh_groups_start_dates, columns=["CohortGroup"])
+        cohorts_list["CohortGroupNum"] = np.arange(1, len(cohorts_list) + 1)
 
         data["OrderPeriod"] = data[self.time_col].dt.to_period(freq)
         start_int = pd.Series(min_cohort_date.to_period(freq=freq)).astype(int)[0]
@@ -137,6 +258,7 @@ class Cohorts:
         cut_bottom: int = 0,
         cut_right: int = 0,
         cut_diagonal: int = 0,
+        start_event: str = None
     ) -> None:
         """
         Calculates the cohort internal values with the defined parameters.
@@ -145,6 +267,7 @@ class Cohorts:
 
         Parameters
         ----------
+        start_event: .....
         cohort_start_unit : :numpy_link:`DATETIME_UNITS<>`
             The way of rounding and formatting of the moment from which the cohort count begins.
             The minimum timestamp is rounded down to the selected datetime unit.
@@ -212,6 +335,7 @@ class Cohorts:
         self.cut_bottom = cut_bottom
         self.cut_right = cut_right
         self.cut_diagonal = cut_diagonal
+        self.start_event = start_event
 
         if self.cohort_period <= 0:
             raise ValueError("cohort_period should be positive integer!")
@@ -224,23 +348,27 @@ class Cohorts:
                                  or if ``cohort_period_unit`` is more detailed than ``cohort_start_unit``!"""
             )
 
-        df = self._add_min_date(
+        df = self.add_cohort_analysis_data(
             data=data,
             cohort_start_unit=self.cohort_start_unit,
             cohort_period=self.cohort_period,
             cohort_period_unit=self.cohort_period_unit,
         )
 
-        cohorts = df.groupby(["CohortGroup", "CohortPeriod"])[[self.user_col]].nunique()
+        cohorts = df[df['event'] != start_event].groupby(["CohortGroup", "CohortPeriod"])[[self.user_col]].nunique()
         cohorts.reset_index(inplace=True)
+        total_by_cohorts = df[df['event'] != start_event].groupby(["CohortGroup"])[[self.user_col]].nunique()
 
         cohorts.rename(columns={self.user_col: "TotalUsers"}, inplace=True)
         cohorts.set_index(["CohortGroup", "CohortPeriod"], inplace=True)
-        cohort_group_size = cohorts["TotalUsers"].groupby(level=0).first()
+        cohort_group_size = df.groupby(["CohortGroup", "CohortPeriod"])[[self.user_col]].nunique()
+        cohort_group_size = cohort_group_size[self.user_col].groupby(level=0).first()
+        #cohort_group_size = cohorts["TotalUsers"].groupby(level=0).first()
         cohorts.reset_index(inplace=True)
         user_retention = (
             cohorts.pivot(index="CohortPeriod", columns="CohortGroup", values="TotalUsers").divide(
                 cohort_group_size, axis=1
+            #cohorts["TotalUsers"].unstack(0).divide(cohort_group_size, axis=1)
             )
         ).T
 
@@ -252,6 +380,8 @@ class Cohorts:
             user_retention.loc["Average"] = user_retention.mean()
 
         self._cohort_matrix_result = user_retention
+        self.group_size = cohort_group_size.to_frame(name="TotalUsers")
+        self.active_size = total_by_cohorts
         collect_data_performance(
             scope="cohorts",
             event_name="metadata",
@@ -287,10 +417,21 @@ class Cohorts:
             "height": height,
         }
 
-        df = self._cohort_matrix_result
+        width_ratio_users_column = 1
+        width_ratio_retention_column = 10
+        df = self.group_size
+        df2 = self._cohort_matrix_result
+        df3 = (self.active_size['user_id'] / self.group_size['TotalUsers']).to_frame(name="ActiveShare")
         figsize = (width, height)
-        figure, ax = plt.subplots(figsize=figsize)
-        sns.heatmap(df, annot=True, fmt=".1%", linewidths=1, linecolor="gray", ax=ax)
+        fig, (ax1, ax2, ax3) = plt.subplots(figsize=figsize, ncols=3, gridspec_kw={'width_ratios':
+            [width_ratio_users_column, width_ratio_retention_column, width_ratio_users_column]})
+        sns.heatmap(df, annot=True, fmt=".0f", linewidths=1, linecolor="gray", cbar=False, ax=ax1)
+        sns.heatmap(df2, annot=True, fmt=".1%", linewidths=1, yticklabels=False, linecolor="gray", ax=ax2)
+        sns.heatmap(df3, annot=True, fmt=".1%", linewidths=1, yticklabels=False,  cbar=False, linecolor="gray", ax=ax3)
+        ax2.set_ylabel('')
+        ax3.set_ylabel('')
+        plt.tight_layout()
+
         collect_data_performance(
             scope="cohorts",
             event_name="metadata",
@@ -299,7 +440,7 @@ class Cohorts:
             eventstream_index=self.__eventstream._eventstream_index,
         )
 
-        return ax
+        return [ax1, ax2]
 
     @time_performance(
         scope="cohorts",
