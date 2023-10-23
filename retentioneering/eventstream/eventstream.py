@@ -1086,6 +1086,7 @@ class Eventstream(
         width: float = 5.0,
         height: float = 5.0,
         show_plot: bool = True,
+        start_event: str = None,
     ) -> Cohorts:
         """
         Show a heatmap visualization of the user appearance grouped by cohorts.
@@ -1113,6 +1114,7 @@ class Eventstream(
             "width": width,
             "height": height,
             "show_plot": show_plot,
+            "start_event": start_event,
         }
 
         not_hash_values = ["cohort_start_unit", "cohort_period"]
