@@ -53,6 +53,7 @@ class Cohorts:
     cut_right: int
     cut_diagonal: int
     start_event: str
+    variant: str
     _cohort_matrix_result: pd.DataFrame
 
     @time_performance(
@@ -68,6 +69,7 @@ class Cohorts:
 
         self._cohort_matrix_result = pd.DataFrame()
         self.group_size = pd.DataFrame()
+        self.unique_values = {}
     '''
 
     @staticmethod
@@ -145,6 +147,16 @@ class Cohorts:
             return cohort_start_unit
         return cohort_period_unit
 
+    def _cumulative_unique_users(self, row):
+        cohort_group = row['CohortGroup']
+        user = row[self.user_col]
+
+        if cohort_group not in self.unique_values:
+            self.unique_values[cohort_group] = set()
+
+        self.unique_values[cohort_group].add(user)
+        return len(self.unique_values[cohort_group])
+
     def add_cohort_analysis_data(
         self,
         data: pd.DataFrame,
@@ -153,7 +165,7 @@ class Cohorts:
         cohort_period_unit: DATETIME_UNITS,
     ) -> pd.DataFrame:
 
-        data = data.copy()
+        #data = data.copy()
 
         freq = self._adjust_frequency(cohort_start_unit, cohort_period_unit)
 
@@ -229,7 +241,24 @@ class Cohorts:
             // converter_freq_
         ) + 1
 
+        data = data.sort_values(by=["CohortGroup", "CohortPeriod", self.user_col])
+        data['cumulative_unique_users'] = data.apply(self._cumulative_unique_users, axis=1)
+
+        #data.to_csv('test.csv')
         return data
+
+    def _changed_variant(self, cohorts, variant):
+        if variant == 'classic':
+            new_col_name = self.user_col
+        elif variant == 'returned':
+            new_col_name = 'max_value_col'
+        else:
+            # Если variant не соответствует ни одному из ожидаемых значений,
+            # вы можете выбросить исключение или обработать этот случай по-другому.
+            raise ValueError(f'Неизвестный вариант: {variant}')
+
+        cohorts.rename(columns={new_col_name: "TotalUsers"}, inplace=True)
+        return cohorts
 
     @staticmethod
     def _cut_cohort_matrix(
@@ -252,7 +281,8 @@ class Cohorts:
         cut_bottom: int = 0,
         cut_right: int = 0,
         cut_diagonal: int = 0,
-        start_event: str = None
+        start_event: str = None,
+        variant: str = None
     ) -> None:
         """
         Calculates the cohort internal values with the defined parameters.
@@ -330,6 +360,7 @@ class Cohorts:
         self.cut_right = cut_right
         self.cut_diagonal = cut_diagonal
         self.start_event = start_event
+        self.variant = variant
 
         if self.cohort_period <= 0:
             raise ValueError("cohort_period should be positive integer!")
@@ -349,11 +380,17 @@ class Cohorts:
             cohort_period_unit=self.cohort_period_unit,
         )
 
-        cohorts = df[df['event'] != start_event].groupby(["CohortGroup", "CohortPeriod"])[[self.user_col]].nunique()
-        cohorts.reset_index(inplace=True)
+        cohorts = df[df['event'] != start_event].groupby(["CohortGroup", "CohortPeriod"]).agg(
+                user_id=(self.user_col, lambda x: x.nunique()),
+                max_value_col=('cumulative_unique_users', 'max')
+            ).reset_index()
+        #print(cohorts)
+        #print(cohorts.columns)
         total_by_cohorts = df[df['event'] != start_event].groupby(["CohortGroup"])[[self.user_col]].nunique()
 
-        cohorts.rename(columns={self.user_col: "TotalUsers"}, inplace=True)
+        self._changed_variant(cohorts, self.variant)
+        #cohorts.rename(columns={self.user_col: "TotalUsers"}, inplace=True)
+        #cohorts.rename(columns={"max_value_col": "TotalUsers"}, inplace=True)
         cohorts.set_index(["CohortGroup", "CohortPeriod"], inplace=True)
         cohort_group_size = df.groupby(["CohortGroup", "CohortPeriod"])[[self.user_col]].nunique()
         cohort_group_size = cohort_group_size[self.user_col].groupby(level=0).first()
