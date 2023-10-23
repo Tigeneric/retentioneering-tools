@@ -77,12 +77,6 @@ class Cohorts:
         return start_point, end_point
 
     @staticmethod
-    def _adjust_frequency(cohort_start_unit: str, cohort_period_unit: str) -> str:
-        if cohort_start_unit == "W":
-            return "D"
-        return cohort_start_unit if DATETIME_UNITS_LIST.index(cohort_start_unit) >= DATETIME_UNITS_LIST.index(cohort_period_unit) else cohort_period_unit
-
-    @staticmethod
     def _create_cohorts(min_date: pd.Timestamp, max_date: pd.Timestamp, freq: str, cohort_period: int, cohort_period_unit: str) -> pd.DataFrame:
         step = np.timedelta64(cohort_period, cohort_period_unit)
 
